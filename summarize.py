@@ -49,8 +49,12 @@ def resolve_url(url: str) -> str:
 
 # ─── 字幕下载 ─────────────────────────────────────────────────────
 
-async def download_subs(url: str, lang_pref: str = "zh") -> tuple[str, str, list]:
-    """下载字幕，返回 (srt_path, title, [分P信息])"""
+async def download_subs(url: str, lang_pref: str = "zh", page: int = None) -> tuple[str, str, list]:
+    """下载字幕, 返回 (srt_path, title, [分P信息])
+    page=None: 下载所有分P, 合并到一个文件
+    page=0: 下载所有分P, 合并
+    page=N: 只下载第N部分
+    """
     from bilibili_api import video, Credential
 
     cred_file = os.path.join(PROJECT_DIR, ".credential.json")
@@ -72,51 +76,100 @@ async def download_subs(url: str, lang_pref: str = "zh") -> tuple[str, str, list
     info = await v.get_info()
     title = info.get("title", "unknown")
     pages = info.get("pages", [])
-    cid = pages[0]["cid"]
 
-    subtitle_info = await v.get_subtitle(cid)
-    subtitles = subtitle_info.get("subtitles", [])
-    if not subtitles:
-        raise RuntimeError(f"[{title}] 没有字幕")
-
-    # 优先中文字幕
-    target = None
-    for sub in subtitles:
-        lan = sub.get("lan", "")
-        lan_doc = sub.get("lan_doc", "")
-        if lang_pref in lan.lower() or "中文" in lan_doc or "zh" in lan.lower():
-            target = sub
-            break
-    if not target:
-        target = subtitles[0]
-
-    subtitle_url = target.get("subtitle_url", "")
-    if subtitle_url.startswith("//"):
-        subtitle_url = "https:" + subtitle_url
-    lan_name = target.get("lan_doc", target.get("lan", "unknown"))
+    # 确定要下载的 P 列表
+    if page is not None and page > 0:
+        p_range = [page]
+    else:
+        p_range = list(range(1, len(pages) + 1))
 
     download_dir = os.path.join(PROJECT_DIR, "downloads", bvid)
     os.makedirs(download_dir, exist_ok=True)
 
-    req = urllib.request.Request(subtitle_url, headers={
-        "User-Agent": "Mozilla/5.0",
-        "Referer": "https://www.bilibili.com/",
-    })
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        raw = json.loads(resp.read())
+    all_entries = []
+    base_time_offset = 0.0  # 多P合并时的时间偏移
 
+    for pid in p_range:
+        if pid > len(pages):
+            break
+        page_info = pages[pid - 1]
+        cid = page_info["cid"]
+        part_name = page_info.get("part", f"P{pid}")
+
+        try:
+            subtitle_info = await v.get_subtitle(cid)
+        except Exception as e:
+            print(f"  [WARN] P{pid} ({part_name}) 字幕获取失败: {e}")
+            continue
+
+        subtitles = subtitle_info.get("subtitles", [])
+        if not subtitles:
+            print(f"  [INFO] P{pid} ({part_name}) 无字幕")
+            continue
+
+        # 优先中文字幕
+        target = None
+        for sub in subtitles:
+            lan = sub.get("lan", "")
+            lan_doc = sub.get("lan_doc", "")
+            if lang_pref in lan.lower() or "中文" in lan_doc or "zh" in lan.lower():
+                target = sub
+                break
+        if not target:
+            target = subtitles[0]
+
+        subtitle_url = target.get("subtitle_url", "")
+        if subtitle_url.startswith("//"):
+            subtitle_url = "https:" + subtitle_url
+
+        req = urllib.request.Request(subtitle_url, headers={
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://www.bilibili.com/",
+        })
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = json.loads(resp.read())
+
+        page_entries = raw.get("body", [])
+
+        if p_range == [pid]:
+            # 单页: 直接保存, 不偏移
+            srt_path = os.path.join(download_dir, "transcript.srt")
+            _json_to_srt(raw, srt_path, time_offset=0.0)
+            print(f"  P{pid} ({part_name}): {len(page_entries)} 条 -> {srt_path}")
+            return srt_path, title, pages
+        else:
+            # 多页: 保存单页 + 累积
+            single_path = os.path.join(download_dir, f"P{pid}_transcript.srt")
+            _json_to_srt(raw, single_path, time_offset=0.0)
+            print(f"  P{pid} ({part_name}): {len(page_entries)} 条 -> {single_path}")
+            # 偏移时间累加
+            for entry in page_entries:
+                e = dict(entry)
+                e["from"] = float(e.get("from", 0)) + base_time_offset
+                e["to"] = float(e.get("to", 0)) + base_time_offset
+                all_entries.append(e)
+            if page_entries:
+                base_time_offset += float(page_entries[-1].get("to", 0))
+
+    if not all_entries:
+        raise RuntimeError(f"[{title}] 所有分P都没有字幕")
+
+    # 保存合并字幕
+    import copy
+    merged = {"body": all_entries}
     srt_path = os.path.join(download_dir, "transcript.srt")
-    _json_to_srt(raw, srt_path)
+    _json_to_srt(merged, srt_path, time_offset=0.0)
+    print(f"  合并: {len(all_entries)} 条 -> {srt_path}")
 
     return srt_path, title, pages
 
 
-def _json_to_srt(data: dict, output_path: str):
+def _json_to_srt(data: dict, output_path: str, time_offset: float = 0.0):
     body = data.get("body", [])
     with open(output_path, "w", encoding="utf-8") as out:
         for i, item in enumerate(body, 1):
             def ts(raw):
-                s = float(raw)
+                s = float(raw) + time_offset
                 h, m = int(s//3600), int((s%3600)//60)
                 sec, ms = int(s%60), int((s-int(s))*1000)
                 return f"{h:02d}:{m:02d}:{sec:02d},{ms:03d}"
@@ -434,7 +487,8 @@ def compare_videos(summaries: list[tuple[str, str]]) -> str:
 # ─── 批量处理 ─────────────────────────────────────────────────────
 
 async def process_single(url: str, index: int, total: int, text_only: bool = False,
-                         lang: str = "zh", template: str = "default") -> dict:
+                         lang: str = "zh", template: str = "default",
+                         page: int = None) -> dict:
     """处理单个视频，返回结果字典"""
     url = resolve_url(url)
     progress = f"[{index}/{total}]"
@@ -442,7 +496,7 @@ async def process_single(url: str, index: int, total: int, text_only: bool = Fal
     try:
         print(f"\n{'='*60}")
         print(f"{progress} {url}")
-        srt_path, title, pages = await download_subs(url, lang)
+        srt_path, title, pages = await download_subs(url, lang, page)
 
         text = extract_text(srt_path)
         txt_path = srt_path.replace(".srt", ".txt")
@@ -457,7 +511,7 @@ async def process_single(url: str, index: int, total: int, text_only: bool = Fal
 
         if not text_only:
             print(f"{progress} 🤖 调用 LLM 总结中... (模板: {template})")
-            summary = summarize_one(text, title, template=template)
+            summary = summarize_one(text, title, template=template, page=page)
             summary_path = srt_path.replace(".srt", "_summary.md")
             with open(summary_path, "w", encoding="utf-8") as f:
                 f.write(summary)
@@ -473,7 +527,7 @@ async def process_single(url: str, index: int, total: int, text_only: bool = Fal
 
 
 async def process_batch(urls: list[str], text_only: bool = False, lang: str = "zh",
-                        compare: bool = False, template: str = "default"):
+                        compare: bool = False, template: str = "default", page: int = None):
     """批量处理"""
     total = len(urls)
     print(f"\n🚀 批量处理 {total} 个视频\n")
@@ -484,7 +538,7 @@ async def process_batch(urls: list[str], text_only: bool = False, lang: str = "z
         url = url.strip()
         if not url or url.startswith("#"):
             continue
-        r = await process_single(url, i, total, text_only, lang, template=template)
+        r = await process_single(url, i, total, text_only, lang, template=template, page=page)
         results.append(r)
         if not r["error"]:
             successes.append(r)
@@ -549,13 +603,13 @@ async def main_async(args):
         else:
             urls = args.urls
 
-        await process_batch(urls, args.text_only, args.lang, args.compare, template=args.template)
+        await process_batch(urls, args.text_only, args.lang, args.compare, template=args.template, page=args.page)
         return
 
     # 单视频模式
     url = resolve_url(args.url)
     print("=" * 60)
-    srt_path, title, pages = await download_subs(url, args.lang)
+    srt_path, title, pages = await download_subs(url, args.lang, args.page)
 
     text = extract_text(srt_path)
     txt_path = srt_path.replace(".srt", ".txt")
@@ -571,7 +625,7 @@ async def main_async(args):
             print(f"\n... (完整文本见 {txt_path})")
         return
 
-    summary = summarize_one(text, title, template=args.template)
+    summary = summarize_one(text, title, template=args.template, page=args.page)
     summary_path = srt_path.replace(".srt", "_summary.md")
     with open(summary_path, "w", encoding="utf-8") as f:
         f.write(summary)
@@ -610,6 +664,7 @@ def main():
     parser.add_argument("--urls", nargs="+", metavar="URL", help="批量传入多个 URL")
     parser.add_argument("--compare", action="store_true", help="批量模式下生成综合对比分析")
     parser.add_argument("--text-only", action="store_true", help="仅提取字幕文本")
+    parser.add_argument("--page", type=int, default=None, help="下载指定分P (默认全部)")
     parser.add_argument("--template", choices=["default", "podcast"], default="default",
                         help="总结模板 (default=标准, podcast=播客分析)")
     parser.add_argument("--lang", default="zh", help="字幕语言偏好 (默认 zh)")
