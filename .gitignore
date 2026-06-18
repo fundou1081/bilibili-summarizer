@@ -1,6 +1,13 @@
+# 凭据
+.credential.json
+
+# 输出 (大文件, 用户跑完自己生成)
+wiki/
+graph.png
+graph.html
+downloads/
+
+# Python
 __pycache__/
 *.pyc
-.credential.json
-downloads/
-.env
-.DS_Store
+.venv/
