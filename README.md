@@ -235,3 +235,48 @@ python3 test_transcribe_skill.py
 ## License
 
 MIT
+
+---
+
+## ⚠️ 开发事故记录 (2026-08-29)
+
+### transcribe_skill.py 重构覆盖事故
+
+**时间**: 2026-08-29 13:31 → 14:46 (Plan B 重构期间)
+
+**根因 (按时序)**:
+1. `git mv transcribe_skill.py cli/` 失败 (fatal: not under version control)
+2. **没意识到**这意味着文件没 commit 过 → `cat > transcribe_skill.py` 写 shim 时**直接覆盖了原文件**
+3. 之后 `cp transcribe_skill.py cli/transcribe_cli.py && rm transcribe_skill.py` 复制的是 shim, 不是原码
+4. `__pycache__/transcribe_skill.cpython-311.pyc` 是 shim 编译产物 (813 字节), 没用
+
+**灾难性后果**:
+- `transcribe_skill.py` 是 3 状态机核心 (LOCK/UNLOCK + --move-done + _check_all_summaries)
+- **从未 commit 过** (git 历史完全无)
+- 无 .bak / 无 stash / 无 reflog 备份
+
+**恢复**:
+- 从对话历史 edit 记录重建 (所有上文的 edit/测试输出保留)
+- 重建为 `cli/transcribe_cli.py` (23492 字节, 655 行, 含 LOCK/UNLOCK 3 状态机)
+- 根目录 `transcribe_skill.py` 改 shim (1166 字节, 用 `sys.modules[__name__] = _mod` 让 ts 和 cli 共享同一 module 对象)
+
+**Shim 关键设计** (patch 生效):
+```python
+# 强制让 transcribe_skill 和 cli.transcribe_cli 是同一个 module 对象
+# 这样 patch.object(ts, 'scan_favorites') 和 patch.object(cli, 'scan_favorites') patch 同一个函数
+sys.modules[__name__] = _mod
+sys.modules.setdefault("cli.transcribe_cli", _mod)
+```
+
+**教训 (4 条)**:
+1. **移动 untracked 文件前**: 必须先 `git add` 或确认有备份
+2. **`cat > file.py` 是覆盖语义, 不是 append**: 写 shim 时必须确认原文件无重要内容
+3. **git mv 失败 = "fatal: not under version control"**: 说明文件没 commit, 不是 "文件不存在"
+4. **未 commit 的代码 = 易失**: 必须先 commit 再 refactor
+
+**测试状态** (恢复后): 93 pass / 1 fail
+- 1 fail = `scan_favorites` 真调 B 站 API, 返回 0 视频 (「待总结」收藏夹当前真为空, 非代码 bug)
+
+**恢复 commits**:
+- `5b0fac9 refactor: 重构代码到 cli/core/wiki/analyze 子目录`
+- `7992146 feat: 收藏夹批量转录 3 状态机 (cli/transcribe_cli + 兼容 shim)`
