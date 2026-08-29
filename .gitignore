@@ -1,5 +1,7 @@
-# 凭据
+# 凭据 (敏感, 不能上传)
 .credential.json
+.env
+*.credential*
 
 # 输出 (大文件, 用户跑完自己生成)
 wiki/
@@ -7,7 +9,23 @@ graph.png
 graph.html
 downloads/
 
+# 收藏夹转录产物 (含 audio.m4a 大文件)
+transcribed/
+downloads_archive/
+logs/
+funasr_runtime/
+
 # Python
 __pycache__/
 *.pyc
 .venv/
+*.egg-info/
+
+# IDE / 系统
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# 临时测试
+/tmp/
