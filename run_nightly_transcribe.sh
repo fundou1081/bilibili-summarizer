@@ -30,11 +30,28 @@ cd "$(dirname "$0")"
 # 确保 log 目录
 mkdir -p logs
 
+# 关键: 找带 bilibili_api 的 Python (cron 默认 PATH 不含 miniconda)
+# 优先 miniconda3, 其次用户 PATH 里的 python3
+PYTHON=""
+if [ -x "$HOME/miniconda3/bin/python3" ]; then
+    PYTHON="$HOME/miniconda3/bin/python3"
+elif [ -x "/opt/homebrew/bin/python3" ]; then
+    PYTHON="/opt/homebrew/bin/python3"
+else
+    PYTHON=$(command -v python3 2>/dev/null || echo "/usr/bin/python3")
+fi
+
+# 验证选中的 Python 真的有 bilibili_api
+if ! "$PYTHON" -c "import bilibili_api" 2>/dev/null; then
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] ✗ 选择的 Python 没有 bilibili_api: $PYTHON" | tee -a logs/cron_error.log
+    exit 1
+fi
+
 # 时间戳
 TS=$(date +"%Y-%m-%d %H:%M:%S")
 LOG_FILE="logs/nightly_${TS// /_}.log"
 
-echo "[$TS] 开始夜间转录 (auto + move-done)" | tee -a "$LOG_FILE"
+echo "[$TS] 开始夜间转录 (auto + move-done) [Python: $PYTHON]" | tee -a "$LOG_FILE"
 
 # 加载 .env (python summarize._load_dotenv() 会在脚本里自己 load, bash 不再 source
 # 因为 .env 含中文/括号注释, bash source 会 parse 错误)
@@ -47,7 +64,7 @@ fi
 
 # 跑主脚本
 EXIT_CODE=0
-python3 transcribe_skill.py \
+"$PYTHON" transcribe_skill.py \
     --auto \
     --move-done \
     --report-to "$HOME/my_bili_data/nightly_transcribe_report.md" \
