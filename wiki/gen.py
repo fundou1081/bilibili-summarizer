@@ -108,7 +108,8 @@ def load_video_from_dir(video_dir: Path) -> Optional[VideoWiki]:
     # 读取所有分P
     pages = []
     max_duration = 0
-    for srt_path in sorted(video_dir.glob('*_transcript.srt')):
+    # 递归扫所有子目录, 识别 P{N}_transcript.srt (多 P + B 站原名)
+    for srt_path in sorted(video_dir.glob('**/P*_transcript.srt')):
         # P1_transcript.srt → 1
         m = re.match(r'P(\d+)_transcript\.srt', srt_path.name)
         if not m:
@@ -117,6 +118,18 @@ def load_video_from_dir(video_dir: Path) -> Optional[VideoWiki]:
         text, duration = extract_srt_text(srt_path)
         pages.append(VideoPage(page_num, srt_path, text))
         max_duration = max(max_duration, duration)
+
+    # 兑底: 递归找 transcript.srt (ASR fallback / --page N 单分P)
+    if not pages:
+        for srt_path in sorted(video_dir.glob('**/transcript.srt')):
+            text, duration = extract_srt_text(srt_path)
+            # 试从路径推 page_num (P1/transcript.srt → 1)
+            parent_name = srt_path.parent.name
+            pm = re.match(r'P(\d+)', parent_name)
+            page_num = int(pm.group(1)) if pm else 1
+            pages.append(VideoPage(page_num, srt_path, text))
+            max_duration = max(max_duration, duration)
+            break  # 只拿第一个, 避免重复
 
     if not pages:
         return None

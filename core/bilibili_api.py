@@ -33,11 +33,13 @@ import time
 from pathlib import Path
 
 import aiohttp
+from urllib.request import Request, urlopen
 
 # B 站相关
 try:
     from bilibili_api import user as bili_user
     from bilibili_api import video as bili_video
+    from bilibili_api import Credential
     HAS_BILI_API = True
 except ImportError:
     HAS_BILI_API = False
@@ -47,22 +49,31 @@ except ImportError:
 sys.path.insert(0, str(Path(__file__).parent))
 from bilibili_cc import download_subtitles_async  # noqa: E402
 
+_BASE_DIR = Path(__file__).parent.resolve()
 
-DOWNLOADS_DIR = Path('downloads')
-COOKIE_FILE = Path('.credential.json')
+# ─── Global output dir (set from env or default) ─────────────────────
+# Can be overridden via --output-dir in the main parser
+_BILI_OUTPUT_DIR = os.environ.get('BILI_DOWNLOADS_DIR', str(_BASE_DIR / 'downloads'))
+DOWNLOADS_DIR = Path(_BILI_OUTPUT_DIR)
+COOKIE_FILE = _BASE_DIR / '.credential.json'
 
 # ─────────────────────────────────────────────────────────────────────
 # 凭据
 # ─────────────────────────────────────────────────────────────────────
 
-def load_credential() -> dict:
-    """从 .credential.json 读 SESSDATA (登录用)"""
+def load_credential():
+    """从 .credential.json 读 SESSDATA (登录用), 返回 Credential 对象"""
     if not COOKIE_FILE.exists():
-        return {}
+        return None
     try:
-        return json.loads(COOKIE_FILE.read_text(encoding='utf-8'))
+        d = json.loads(COOKIE_FILE.read_text(encoding='utf-8'))
+        return Credential(
+            sessdata=d.get('sessdata'),
+            bili_jct=d.get('bili_jct'),
+            buvid3=d.get('buvid3'),
+        )
     except Exception:
-        return {}
+        return None
 
 
 def save_credential(cred: dict):
@@ -77,7 +88,7 @@ def already_downloaded(bvid: str) -> bool:
     bvid_dir = DOWNLOADS_DIR / bvid
     if not bvid_dir.exists():
         return False
-    return any(bvid_dir.glob('*_transcript.srt'))
+    return any(bvid_dir.glob('*_transcript.srt')) or any(bvid_dir.glob('*.srt'))
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -125,7 +136,7 @@ async def get_favorite_folders(mid: int) -> list[dict]:
     if not HAS_BILI_API:
         return []
     try:
-        u = bili_user.User(mid=mid, credential=load_credential())
+        u = bili_user.User(uid=mid, credential=load_credential())
         # get_fav_folder_info_and_videos? or use favorite API
         favs = await u.get_favorite_folder()
         return favs
@@ -168,14 +179,15 @@ async def get_watch_later_videos() -> list[str]:
         return []
     try:
         # bilibili-api-python 没有 watch_later API, 用 web API
-        # 这里用 HTTP 直接调
         cred = load_credential()
-        sessdata = cred.get('SESSDATA') or cred.get('sessdata', '')
+        if not cred:
+            return []
         url = 'https://api.bilibili.com/x/v2/history/toview'
-        cookies = {'SESSDATA': sessdata}
-        async with aiohttp.ClientSession(cookies=cookies) as s:
-            async with s.get(url) as r:
-                data = await r.json()
+        headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.bilibili.com/'}
+        req = Request(url, headers=headers)
+        req.add_header('Cookie', f"SESSDATA={cred.sessdata}")
+        with urlopen(req, timeout=15) as r:
+            data = json.loads(r.read())
         items = data.get('data', {}).get('list', [])
         return [it['bvid'] for it in items if 'bvid' in it]
     except Exception as e:
@@ -188,7 +200,7 @@ async def get_followings(mid: int) -> list[dict]:
     if not HAS_BILI_API:
         return []
     try:
-        u = bili_user.User(mid=mid, credential=load_credential())
+        u = bili_user.User(uid=mid, credential=load_credential())
         page = 1
         ups = []
         while True:
@@ -211,7 +223,7 @@ async def get_up_videos(mid: int, max_pages: int = 5) -> list[str]:
     if not HAS_BILI_API:
         return []
     try:
-        u = bili_user.User(mid=mid, credential=load_credential())
+        u = bili_user.User(uid=mid, credential=load_credential())
         videos = await u.get_videos(pn=1, ps=30)
         # bilibili-api-python: videos 是 dict {'list': [...], 'page': ..., 'total': ...}
         items = videos.get('list', {}).get('vlist', []) if isinstance(videos, dict) else []
@@ -352,6 +364,13 @@ def main():
     up_p.add_argument('--mid', type=int, required=True, help='UP 主 mid')
 
     args = parser.parse_args()
+
+    # ── output-dir override via env ─────────────────────────────────
+    # Usage: BILI_DOWNLOADS_DIR=/path python3 fetch.py favorites --incremental
+    global DOWNLOADS_DIR
+    _env_dir = os.environ.get('BILI_DOWNLOADS_DIR')
+    if _env_dir:
+        DOWNLOADS_DIR = Path(_env_dir)
     DOWNLOADS_DIR.mkdir(exist_ok=True)
 
     if not HAS_BILI_API:

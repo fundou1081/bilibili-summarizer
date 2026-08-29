@@ -25,8 +25,40 @@ import asyncio
 import argparse
 import urllib.request
 import time
+import subprocess
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load_dotenv():
+    """自动加载项目根目录的 .env (简单 key=value 解析, 不依赖 python-dotenv)。
+    优先级: 系统环境变量 > .env 文件 (避免覆盖用户已有的 export)
+    """
+    env_path = os.path.join(PROJECT_DIR, ".env")
+    if not os.path.exists(env_path):
+        return
+    try:
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip()
+                # 去掉可选的引号
+                if value.startswith('"') and value.endswith('"'):
+                    value = value[1:-1]
+                elif value.startswith("'") and value.endswith("'"):
+                    value = value[1:-1]
+                # 只在环境变量未设时填充 (优先级: shell export > .env)
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except Exception:
+        pass  # .env 解析失败不致命, 让后续运行时探查
+
+
+_load_dotenv()  # 模块导入时自动加载
 
 
 def resolve_url(url: str) -> str:
@@ -49,11 +81,15 @@ def resolve_url(url: str) -> str:
 
 # ─── 字幕下载 ─────────────────────────────────────────────────────
 
-async def download_subs(url: str, lang_pref: str = "zh", page: int = None) -> tuple[str, str, list]:
+async def download_subs(url: str, lang_pref: str = "zh", page: int = None,
+                        asr_model: str = "sensevoice", asr_max_duration: int = None) -> tuple[str, str, list]:
     """下载字幕, 返回 (srt_path, title, [分P信息])
     page=None: 下载所有分P, 合并到一个文件
     page=0: 下载所有分P, 合并
     page=N: 只下载第N部分
+    asr_model / asr_max_duration: B 站无字幕时 fallback 到本地 ASR (bilibili_asr.py)
+        asr_model: sensevoice (多语, 默认) / paraformer (中文专用)
+        asr_max_duration: 限制只处理前 N 秒 (None=整段, 超长视频建议设)
     """
     from bilibili_api import video, Credential
 
@@ -152,7 +188,13 @@ async def download_subs(url: str, lang_pref: str = "zh", page: int = None) -> tu
                 base_time_offset += float(page_entries[-1].get("to", 0))
 
     if not all_entries:
-        raise RuntimeError(f"[{title}] 所有分P都没有字幕")
+        # B 站无字幕 → fallback 到本地 ASR (bilibili_asr.py subprocess)
+        return await _fallback_to_asr(
+            bvid=bvid, title=title, pages=pages,
+            download_dir=download_dir,
+            asr_model=asr_model,
+            asr_max_duration=asr_max_duration,
+        )
 
     # 保存合并字幕
     import copy
@@ -176,6 +218,99 @@ def _json_to_srt(data: dict, output_path: str, time_offset: float = 0.0):
             out.write(f"{i}\n{ts(item['from'])} --> {ts(item['to'])}\n")
             content = item['content'].replace(chr(10), chr(92) + 'N')
             out.write(f"{content}\n\n")
+
+
+# ─── ASR fallback (B 站无字幕 → 本地 FunASR) ─────────────────────────
+
+async def _fallback_to_asr(bvid: str, title: str, pages: list,
+                           download_dir: str, asr_model: str,
+                           asr_max_duration: int = None) -> tuple:
+    """B 站无字幕 → subprocess 调 bilibili_asr.py 走本地 FunASR (SenseVoice/Paraformer)。
+    返回 (srt_path, title, pages) - 跟 download_subs 一样接口, 下游无感。
+
+    设计:
+      - 用 subprocess (不用 in-process 调用): bilibili_asr.py 内部用 asyncio.run,
+        不能在现有 event loop 里调
+      - ASR 生成的 auto.srt 复制为 transcript.srt (跟 B 站字幕路径一致)
+      - 长视频 (>30min) 警告, 提示用 --asr-max-duration
+
+    依赖:
+      - ~/my_proj/bilibili-summarizer/bilibili_asr.py 必须存在
+      - ~/my_proj/bilibili-summarizer/funasr_runtime/ 必须有 binary + GGUF
+    """
+    bilibili_asr_script = os.path.join(PROJECT_DIR, "bilibili_asr.py")
+    if not os.path.exists(bilibili_asr_script):
+        raise RuntimeError(
+            f"找不到 bilibili_asr.py: {bilibili_asr_script}\n"
+            f"请确认 FunASR 部署完整: ls ~/my_proj/bilibili-summarizer/funasr_runtime/funasr-gguf/"
+        )
+
+    # 长视频警告
+    duration = pages[0].get("duration", 0) if pages else 0
+    if duration and not asr_max_duration:
+        mins = duration // 60
+        if mins > 30:
+            print(f"  ⚠️  视频 {mins} 分钟长, 默认 ASR 整段会很慢 + 占磁盘")
+            print(f"      建议加 --asr-max-duration {min(mins*60, 1800)} 先试")
+
+    # subprocess 调 bilibili_asr.py
+    cmd = [sys.executable, bilibili_asr_script, bvid, "--model", asr_model]
+    if asr_max_duration:
+        cmd += ["--max-duration", str(asr_max_duration)]
+
+    print(f"  [ASR fallback] {' '.join(cmd)}")
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            cwd=PROJECT_DIR,
+            timeout=3600,  # 1 小时上限
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"ASR 超时 (>1h)。建议加 --asr-max-duration 1800 (前 30 分钟) 先试"
+        )
+    except Exception as e:
+        raise RuntimeError(f"ASR subprocess 失败: {type(e).__name__}: {e}")
+
+    # 显示 ASR 输出 (缩进)
+    if proc.stdout:
+        for line in proc.stdout.splitlines():
+            if line.strip():
+                print(f"    {line}")
+    if proc.stderr:
+        for line in proc.stderr.splitlines()[-10:]:  # 只看最后 10 行
+            if line.strip():
+                print(f"    [stderr] {line}")
+
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"ASR fallback 失败 (rc={proc.returncode})。"
+            f"查看上面 bilibili_asr 输出找原因。"
+        )
+
+    # 找生成的 SRT (bilibili_asr 写 auto.srt 或 auto-{lang}.srt)
+    from pathlib import Path
+    srt_files = sorted(Path(download_dir).glob("auto*.srt"))
+    if not srt_files:
+        raise RuntimeError(
+            f"ASR 完成后, {download_dir} 下没找到 auto*.srt。"
+            f"可能 bilibili_asr 出错了但没 raise (罕见)。"
+        )
+    asr_srt = srt_files[0]
+
+    # 复制为 transcript.srt (跟 B 站字幕路径一致, 下游无需改)
+    transcript_path = os.path.join(download_dir, "transcript.srt")
+    if asr_srt.resolve() != Path(transcript_path).resolve():
+        import shutil
+        shutil.copy(asr_srt, transcript_path)
+        srt_path = transcript_path
+    else:
+        srt_path = str(asr_srt)
+
+    print(f"  ✓ ASR fallback 完成 → {srt_path}")
+    return srt_path, title, pages
 
 
 # ─── 文本提取 ─────────────────────────────────────────────────────
@@ -356,8 +491,49 @@ COMPARE_PROMPT = """你是B站视频对比分析助手。以下是多个相关�
 
 def _get_llm_client():
     """返回 (url, api_key, model) 三元组 - 使用 Anthropic 格式"""
+    # ASCII key 验证: HTTP header (latin-1) 不容许非 ASCII 字符
+    # 如果 .env 或 环境变量里的 key 被 chat 截断,会含 \u2026 等,这里 fail-fast
+    def _validate_key(key: str, name: str):
+        if not key:
+            raise RuntimeError(
+                f"未找到 {name} 环境变量。请设置:\n"
+                f"  export {name}='你的完整 key'\n"
+                f"或在 .env 里填完整 key (不能用 chat 贴的会被截断)"
+            )
+        if not key.isascii():
+            raise RuntimeError(
+                f"{name} 包含非 ASCII 字符,可能是被 chat 截断了。\n"
+                f"  Key 长度: {len(key)} (正常 ~120)\n"
+                f"  问题字符位置: {[i for i, c in enumerate(key) if not c.isascii()][:5]}\n"
+                f"修复方法:\n"
+                f"  1. 手动编辑 .env,填入完整 key\n"
+                f"  2. 或在 shell 里 export {name}='完整 key'"
+            )
+        return key
+
     # 优先: DeepSeek
     api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    if api_key:
+        return {
+            "api": "openai",
+            "url": "https://api.deepseek.com/v1/chat/completions",
+            "key": _validate_key(api_key, "DEEPSEEK_API_KEY"),
+            "model": "deepseek-chat",
+            "is_anthropic": False,
+        }
+
+    # 其次: MiniMax (Anthropic 格式)
+    api_key = os.environ.get("MINIMAX_API_KEY", "")
+    if api_key:
+        return {
+            "api": "anthropic",
+            "url": "https://api.minimaxi.com/anthropic/v1/messages",
+            "key": _validate_key(api_key, "MINIMAX_API_KEY"),
+            "model": os.environ.get("MINIMAX_MODEL", "MiniMax-M2.7"),
+            "is_anthropic": True,
+        }
+
+    _validate_key("", "DEEPSEEK_API_KEY 或 MINIMAX_API_KEY")  # 报 "未找到" 错
     if api_key:
         return {
             "api": "openai",
@@ -378,9 +554,7 @@ def _get_llm_client():
             "is_anthropic": True,
         }
 
-    raise RuntimeError(
-        "未找到 LLM API Key。请设置 DEEPSEEK_API_KEY 或 MINIMAX_API_KEY 环境变量"
-    )
+    _validate_key("", "MINIMAX_API_KEY")  # 报 "未找到" 错
 
 
 def _llm_call(client_cfg: dict, system: str, user: str, max_tokens: int = 2000) -> str:
@@ -488,7 +662,8 @@ def compare_videos(summaries: list[tuple[str, str]]) -> str:
 
 async def process_single(url: str, index: int, total: int, text_only: bool = False,
                          lang: str = "zh", template: str = "default",
-                         page: int = None) -> dict:
+                         page: int = None, asr_model: str = "sensevoice",
+                         asr_max_duration: int = None) -> dict:
     """处理单个视频，返回结果字典"""
     url = resolve_url(url)
     progress = f"[{index}/{total}]"
@@ -496,7 +671,11 @@ async def process_single(url: str, index: int, total: int, text_only: bool = Fal
     try:
         print(f"\n{'='*60}")
         print(f"{progress} {url}")
-        srt_path, title, pages = await download_subs(url, lang, page)
+        srt_path, title, pages = await download_subs(
+            url, lang, page,
+            asr_model=asr_model,
+            asr_max_duration=asr_max_duration,
+        )
 
         text = extract_text(srt_path)
         txt_path = srt_path.replace(".srt", ".txt")
@@ -527,7 +706,8 @@ async def process_single(url: str, index: int, total: int, text_only: bool = Fal
 
 
 async def process_batch(urls: list[str], text_only: bool = False, lang: str = "zh",
-                        compare: bool = False, template: str = "default", page: int = None):
+                        compare: bool = False, template: str = "default", page: int = None,
+                        asr_model: str = "sensevoice", asr_max_duration: int = None):
     """批量处理"""
     total = len(urls)
     print(f"\n🚀 批量处理 {total} 个视频\n")
@@ -538,7 +718,11 @@ async def process_batch(urls: list[str], text_only: bool = False, lang: str = "z
         url = url.strip()
         if not url or url.startswith("#"):
             continue
-        r = await process_single(url, i, total, text_only, lang, template=template, page=page)
+        r = await process_single(
+            url, i, total, text_only, lang,
+            template=template, page=page,
+            asr_model=asr_model, asr_max_duration=asr_max_duration,
+        )
         results.append(r)
         if not r["error"]:
             successes.append(r)
@@ -603,13 +787,21 @@ async def main_async(args):
         else:
             urls = args.urls
 
-        await process_batch(urls, args.text_only, args.lang, args.compare, template=args.template, page=args.page)
+        await process_batch(
+            urls, args.text_only, args.lang, args.compare,
+            template=args.template, page=args.page,
+            asr_model=args.asr_model, asr_max_duration=args.asr_max_duration,
+        )
         return
 
     # 单视频模式
     url = resolve_url(args.url)
     print("=" * 60)
-    srt_path, title, pages = await download_subs(url, args.lang, args.page)
+    srt_path, title, pages = await download_subs(
+        url, args.lang, args.page,
+        asr_model=args.asr_model,
+        asr_max_duration=args.asr_max_duration,
+    )
 
     text = extract_text(srt_path)
     txt_path = srt_path.replace(".srt", ".txt")
@@ -668,6 +860,12 @@ def main():
     parser.add_argument("--template", choices=["default", "podcast"], default="default",
                         help="总结模板 (default=标准, podcast=播客分析)")
     parser.add_argument("--lang", default="zh", help="字幕语言偏好 (默认 zh)")
+    parser.add_argument("--asr-model", default="sensevoice",
+                        choices=["sensevoice", "paraformer"],
+                        help="B 站无字幕时本地 ASR 模型 (默认 sensevoice 多语; "
+                             "paraformer 中文专用但英文差)")
+    parser.add_argument("--asr-max-duration", type=int, default=None, metavar="SEC",
+                        help="B 站无字幕时 ASR 只处理前 N 秒 (避免超长视频爆时间)")
     args = parser.parse_args()
 
     if not args.url and not args.batch and not args.urls:
