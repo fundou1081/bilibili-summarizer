@@ -396,17 +396,23 @@ async def main_async(args):
     items = scan_favorites(args.source)
     print(f"✓ 找到 {len(items)} 个视频")
 
+    # --bvid 旁路: 不管收藏夹空不空, 都构造合成 item 处理
+    # 用于测试 / 单视频手动触发, 不依赖收藏夹状态
+    if args.bvid:
+        matched = [i for i in items if i["bvid"] == args.bvid]
+        if matched:
+            items = matched
+        else:
+            print(f"⚠️  {args.bvid} 不在收藏夹 {args.source}, 构造合成 item (test 旁路模式)")
+            items = [{"bvid": args.bvid, "aid": 0,
+                      "title": f"(test:{args.bvid})", "duration": 0}]
+
     if not items:
         print("收藏夹是空的, 退出")
         return
 
     if args.limit:
         items = items[:args.limit]
-    if args.bvid:
-        items = [i for i in items if i["bvid"] == args.bvid]
-        if not items:
-            print(f"❌ 收藏夹 {args.source} 里没找到 {args.bvid}")
-            return
 
     if args.dry_run:
         print(f"\n=== DRY RUN ===")
