@@ -1,5 +1,5 @@
 #!/bin/bash
-# run_naily_transcribe.sh — 上午 9:20 自动转录 + 移动 wrapper
+# run_nightly_transcribe.sh — 上午 9:20 自动转录 + 移动 wrapper
 #
 # 用法:
 #   ./run_nightly_transcribe.sh    # 实际跑
