@@ -1,13 +1,13 @@
 #!/bin/bash
-# run_nightly_transcribe.sh — 上午 9:30 自动转录 + 移动 wrapper
+# run_nightly_transcribe.sh — 晚上 7:10 自动转录 + 移动 wrapper
 #
 # 用法:
 #   ./run_nightly_transcribe.sh    # 实际跑
 #   ./run_nightly_transcribe.sh --dry-run  # 只扫描不转录 (测试)
 #
-# 注册到 OpenClaw cron (9:30 AM Asia/Shanghai):
-#   openclaw cron add --name bilibili-daytime-transcribe \
-#     --cron "30 9 * * *" --tz "Asia/Shanghai" \
+# 注册到 OpenClaw cron (7:10 PM Asia/Shanghai):
+#   openclaw cron add --name bilibili-evening-transcribe \
+#     --cron "10 19 * * *" --tz "Asia/Shanghai" \
 #     --command "/Users/fundou/my_proj/bilibili-summarizer/run_nightly_transcribe.sh" \
 #     --command-cwd "/Users/fundou/my_proj/bilibili-summarizer" \
 #     --timeout-seconds 7200
@@ -18,7 +18,7 @@
 #   3. source .env 加载 MINIMAX_API_KEY (注入本地不打印)
 #   4. 跑 transcribe_skill --auto --move-done --report-to ~/my_bili_data/nightly_transcribe_report.md
 #   5. 退出码: 0=全成功, 非0=有失败
-#   6. HEARTBEAT.md 9:30-11 AM 读 nightly_transcribe_report.md 推飞书
+#   6. HEARTBEAT.md 19:10-21:00 读 nightly_transcribe_report.md 推飞书
 #
 # 注意: 不在 chat 里打印 API key 内容 (飞书脱敏 + 安全)
 
