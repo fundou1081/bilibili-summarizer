@@ -56,7 +56,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
 
-PROJECT_DIR = Path(__file__).parent.resolve()
+PROJECT_DIR = Path(__file__).parent.parent.resolve()
 FUNASR_DIR = PROJECT_DIR.parent / "funasr_runtime"
 DOWNLOADS_DIR = PROJECT_DIR / "downloads"
 CRED_FILE = PROJECT_DIR / ".credential.json"
