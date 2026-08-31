@@ -169,7 +169,7 @@ wiki/
 python3 transcribe_skill.py
 
 # cron 用: 全自动 + 自动确认 + 写报告
-python3 transcribe_skill.py --auto --move-done --report-to ~/my_bili_data/nightly_transcribe_report.md
+python3 transcribe_skill.py --auto --move-done --report-to ~/my_bili_data/nightly_transcribe_report.md  # B1: 默认扫 2 源 (总结中 优先, 待总结 orphan 兜底)
 
 # 只扫描 (看哪些视频)
 python3 transcribe_skill.py --dry-run
@@ -180,13 +180,14 @@ python3 transcribe_skill.py --asr-max-duration 1800
 # 测试单个视频 (不打乱收藏夹)
 python3 transcribe_skill.py --bvid BV1xxx --skip-move
 
-# --move-done 模式: 只检查「总结中」的视频, 真 summary 才移到「已总结」
+# --move-done 模式 (B1, 2026-08-31): 默认扫 2 个源 (总结中优先, 一个一个看), 真 summary 才移到「已总结」
+#   总结中 (4012580756, LOCK 状态, 优先) → 待总结 (4115533556, orphan 兜底, e.g. 人工转录没走过 LOCK)
 python3 transcribe_skill.py --move-done --auto
 ```
 
 ### 总结质量校验
 
-`--move-done` 模式: 视频要被移到「已总结」必须**所有分P summary.md 都合格**:
+`--move-done` 模式 (B1 改进): 视频要被移到「已总结」必须**所有分P summary.md 都合格**, 默认扫 2 源 (总结中 优先, 待总结 兜底):
 
 - ✅ size ≥ 1.5KB
 - ✅ 5 段标记 ≥ 3 个 (`📺🧠💡🔑📐`)
