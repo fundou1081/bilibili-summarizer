@@ -465,8 +465,15 @@ def test_move_done_cli_dry():
             })()
             asyncio.run(ts.move_done_mode(args))
 
-            check("mock scan 调过 1 次", mock_scan.call_count == 1,
+            check("mock scan 调过 2 次 (总结中 + 待总结)", mock_scan.call_count == 2,
                   f"got {mock_scan.call_count}")
+            if mock_scan.call_count >= 2:
+                check("第 1 次扫 总结中 (4012580756, 优先)",
+                      mock_scan.call_args_list[0].args[0] == 4012580756,
+                      f"got {mock_scan.call_args_list[0].args[0]}")
+                check("第 2 次扫 待总结 (4115533556, 兜底)",
+                      mock_scan.call_args_list[1].args[0] == 4115533556,
+                      f"got {mock_scan.call_args_list[1].args[0]}")
             check("report 文件已写", report.exists())
             content = report.read_text(encoding="utf-8")
             check("报告含 'move_done'", "move_done" in content)
@@ -626,13 +633,16 @@ def test_move_done_scans_in_progress():
             })()
             asyncio.run(ts.move_done_mode(args))
 
-            check("scan_favorites 调过 1 次", mock_scan.call_count == 1,
+            check("scan_favorites 调过 2 次 (B1: 默认扫两个)", mock_scan.call_count == 2,
                   f"got {mock_scan.call_count}")
-            if mock_scan.call_count >= 1:
-                # 关键: 必须用 in_progress_fav (4012580756), 不是 source
-                check("scan 用 in_progress_fav (总结中 4012580756), 不是 source",
-                      mock_scan.call_args.args[0] == 4012580756,
-                      f"got scan arg={mock_scan.call_args.args[0]}")
+            if mock_scan.call_count >= 2:
+                # 关键: 必须用 in_progress_fav (4012580756) 优先, 然后 source (4115533556) 兜底
+                check("第 1 次扫 总结中 (4012580756, 优先)",
+                      mock_scan.call_args_list[0].args[0] == 4012580756,
+                      f"got scan[0] arg={mock_scan.call_args_list[0].args[0]}")
+                check("第 2 次扫 待总结 (4115533556, 兜底 orphan)",
+                      mock_scan.call_args_list[1].args[0] == 4115533556,
+                      f"got scan[1] arg={mock_scan.call_args_list[1].args[0]}")
             check("报告含 '总结中存量'", "总结中存量" in report.read_text(encoding="utf-8"))
 
 

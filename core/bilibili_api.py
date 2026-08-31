@@ -50,12 +50,13 @@ sys.path.insert(0, str(Path(__file__).parent))
 from bilibili_cc import download_subtitles_async  # noqa: E402
 
 _BASE_DIR = Path(__file__).parent.resolve()
+_PROJECT_DIR = Path(__file__).parent.parent.resolve()
 
 # ─── Global output dir (set from env or default) ─────────────────────
 # Can be overridden via --output-dir in the main parser
 _BILI_OUTPUT_DIR = os.environ.get('BILI_DOWNLOADS_DIR', str(_BASE_DIR / 'downloads'))
 DOWNLOADS_DIR = Path(_BILI_OUTPUT_DIR)
-COOKIE_FILE = _BASE_DIR / '.credential.json'
+COOKIE_FILE = _PROJECT_DIR / '.credential.json'
 
 # ─────────────────────────────────────────────────────────────────────
 # 凭据
@@ -146,30 +147,32 @@ async def get_favorite_folders(mid: int) -> list[dict]:
 
 
 async def get_favorite_videos(media_id: int, page_size: int = 20) -> list[str]:
-    """拿一个收藏夹的所有视频 bvid"""
+    """拿一个收藏夹的所有视频 bvid (新版 bilibili-api-python API)"""
     if not HAS_BILI_API:
-        return []
-    bvids = []
+        raise RuntimeError('bilibili-api-python 未安装')
+    from bilibili_api.favorite_list import get_video_favorite_list_content
+    cred = load_credential()
+    if cred is None:
+        raise RuntimeError('未加载 credential (.credential.json 不存在或 sessdata 为空)')
+    bvids: list[str] = []
     page = 1
     while True:
-        try:
-            # bilibili-api-python 的 API
-            from bilibili_api.favorite_list import FavoriteListVideo
-            f = FavoriteListVideo(media_id=media_id, credential=load_credential())
-            info = await f.get_page(page, page_size)
-            items = info.get('medias') or info.get('data', {}).get('medias', [])
-            if not items:
-                break
-            for item in items:
-                if 'bvid' in item:
-                    bvids.append(item['bvid'])
-            if len(items) < page_size:
-                break
-            page += 1
-            time.sleep(0.3)
-        except Exception as e:
-            print(f'  ⚠️  收藏夹 {media_id} page {page}: {e}')
+        info = await get_video_favorite_list_content(
+            media_id=media_id,
+            page=page,
+            credential=cred,
+        )
+        medias = (info.get('data') or {}).get('medias') or info.get('medias') or []
+        if not medias:
             break
+        for item in medias:
+            bvid = item.get('bvid')
+            if bvid:
+                bvids.append(bvid)
+        if len(medias) < page_size:
+            break
+        page += 1
+        time.sleep(0.3)
     return bvids
 
 

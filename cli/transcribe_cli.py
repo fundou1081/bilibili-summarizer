@@ -514,71 +514,85 @@ async def main_async(args):
 # ─── --move-done 模式 ────────────────────────────────────────────────
 
 async def move_done_mode(args) -> None:
-    """扫描「总结中」收藏夹, 检查每个视频所有分P 是否都有真 summary.md。
+    """扫描「总结中」+「待总结」收藏夹, 检查每个视频所有分P 是否都有真 summary.md。
     全部合格 → 自动 (或确认后) 移到「已总结」收藏夹。
+    优先看「总结中」 (LOCK 状态), 然后看「待总结」 (catch orphan, e.g. 人工转录没走过 LOCK 流水线)。
+    一个一个看, 跨源累加。
     """
     TRANSCRIBED_DIR.mkdir(parents=True, exist_ok=True)
 
-    move_done_source = args.in_progress_fav
-
-    print(f"\n📂 扫描 总结中 {move_done_source} (--move-done) ...")
-    items = scan_favorites(move_done_source)
-    print(f"✓ 找到 {len(items)} 个视频")
-
-    if not items:
-        print("总结中是空的, 退出")
-        if args.report_to:
-            _write_report(args.report_to, mode="move_done",
-                          in_progress_count=0,
-                          items=[], moved=[], skipped=[])
-        return
-
-    if args.bvid:
-        items = [i for i in items if i["bvid"] == args.bvid]
-        if not items:
-            print(f"❌ 总结中 {move_done_source} 里没找到 {args.bvid}")
-            return
+    # 优先级: 总结中 → 待总结 (1 个 1 个看, 跨源累加)
+    sources: list[tuple[str, int]] = [
+        ("总结中", args.in_progress_fav),
+        ("待总结", args.source),
+    ]
 
     moved, skipped = [], []
-    for i, it in enumerate(items, 1):
-        bvid = it["bvid"]
-        title = it["title"]
-        print(f"\n[{i}/{len(items)}] {bvid} {title[:40]}")
+    total_scanned = 0
+    seen_bvids: set[str] = set()  # 防同一个 bvid 跨源重复处理
 
-        ok, reason, parts = _check_all_summaries(bvid, title)
-        if not ok:
-            print(f"  ⊘ 跳过: {reason}")
-            skipped.append({"item": it, "reason": reason})
+    for src_label, src_id in sources:
+        print(f"\n📂 扫描 {src_label} {src_id} (--move-done) ...")
+        items = scan_favorites(src_id)
+        print(f"✓ 找到 {len(items)} 个视频")
+        total_scanned += len(items)
+
+        if not items:
+            print(f"  {src_label} 是空的, 跳过")
             continue
 
-        print(f"  ✓ 所有分P 有真 summary.md ({len(parts)} parts)")
-        for p in parts:
-            print(f"    - P{p['page']} ({p['size']} bytes) {p['title'][:30]}")
-
-        if not args.auto:
-            print(f"\n  本地确认: 移到 已总结 收藏夹 {args.dest}?")
-            resp = input(f"  [y/N]: ").strip().lower()
-            if resp != "y":
-                print(f"  ⊘ 用户跳过")
-                skipped.append({"item": it, "reason": "用户跳过"})
+        if args.bvid:
+            items = [i for i in items if i["bvid"] == args.bvid]
+            if not items:
+                print(f"  {src_label} 里没找到 {args.bvid}")
                 continue
 
-        try:
-            await move_video_to_fav(it["aid"], args.source, args.dest)
-            print(f"  ✓ 已移到收藏夹 {args.dest}")
-            moved.append({"item": it, "parts": parts})
-        except Exception as e:
-            err = f"{type(e).__name__}: {e}"
-            print(f"  ✗ 移动失败: {err}")
-            skipped.append({"item": it, "reason": f"移动失败: {err}"})
+        for i, it in enumerate(items, 1):
+            bvid = it["bvid"]
+            if bvid in seen_bvids:
+                continue
+            seen_bvids.add(bvid)
+
+            title = it["title"]
+            print(f"\n[{i}/{len(items)}] {bvid} {title[:40]} (源: {src_label})")
+
+            ok, reason, parts = _check_all_summaries(bvid, title)
+            if not ok:
+                print(f"  ⊘ 跳过: {reason}")
+                skipped.append({"item": it, "reason": reason, "source": src_label})
+                continue
+
+            print(f"  ✓ 所有分P 有真 summary.md ({len(parts)} parts)")
+            for p in parts:
+                print(f"    - P{p['page']} ({p['size']} bytes) {p['title'][:30]}")
+
+            if not args.auto:
+                print(f"\n  本地确认: 移到 已总结 收藏夹 {args.dest}?")
+                resp = input(f"  [y/N]: ").strip().lower()
+                if resp != "y":
+                    print(f"  ⊘ 用户跳过")
+                    skipped.append({"item": it, "reason": "用户跳过", "source": src_label})
+                    continue
+
+            # 关键修复: 从实际扫描到的源 (src_id) 移到 dest, 不是 args.source
+            try:
+                await move_video_to_fav(it["aid"], src_id, args.dest)
+                print(f"  ✓ 已从 {src_label} 移到 已总结 {args.dest}")
+                moved.append({"item": it, "parts": parts, "source": src_label})
+            except Exception as e:
+                err = f"{type(e).__name__}: {e}"
+                print(f"  ✗ 移动失败: {err}")
+                skipped.append({"item": it, "reason": f"移动失败: {err}", "source": src_label})
 
     print(f"\n{'=' * 60}")
-    print(f"📊 --move-done: ✓ {len(moved)} 移动 / ⊘ {len(skipped)} 跳过 / 总 {len(items)}")
+    print(f"📊 --move-done: ✓ {len(moved)} 移动 / ⊘ {len(skipped)} 跳过 / 总 {total_scanned}")
+    print(f"   源优先级: 总结中 ({args.in_progress_fav}) → 待总结 ({args.source})")
 
     if args.report_to:
         _write_report(args.report_to, mode="move_done",
-                      items=items, moved=moved, skipped=skipped,
-                      in_progress_count=len(items))
+                      items=[],  # move_done 模式里 items 仅作为 in_progress_count 兏底, 以 moved+skipped 为准
+                      moved=moved, skipped=skipped,
+                      in_progress_count=total_scanned)
 
 
 # ─── 报告生成 ────────────────────────────────────────────────────────
