@@ -191,12 +191,12 @@ async def transcribe_one(
 
     # Step 1: 用 summarize.download_subs() 下载/ASR 到 downloads/{BVID}/
     try:
-        sm.download_subs(url, page=page)
+        await sm.download_subs(url, page=page)
     except Exception as e:
         return False, f"download_subs 失败: {type(e).__name__}: {e}"
 
     # Step 2: 整理到 transcribed/{BVID}/P{N}/ 或 transcribed/{BVID}/
-    organized = _organize_transcripts(bvid, page=page)
+    organized = await _organize_transcripts(bvid, page=page)
     if not organized:
         return False, "_organize_transcripts 返回 0 个分P"
 
