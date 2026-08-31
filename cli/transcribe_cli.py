@@ -386,8 +386,9 @@ def update_wiki() -> bool:
 async def main_async(args):
     TRANSCRIBED_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 0. --move-done: 只检查 + 移动, 跳过转录
-    if args.move_done:
+    # 0a. --move-done alone: 只检查 + 移动, 跳过转录
+    # 0b. --move-done + --auto (cron nightly): 先 transcribe, 后 move-done
+    if args.move_done and not args.auto:
         await move_done_mode(args)
         return
 
@@ -509,6 +510,11 @@ async def main_async(args):
             successes=successes,
             failures=failures,
         )
+
+    # --move-done + --auto (cron nightly): transcribe 完后扫并移动残留 orphan
+    if args.move_done and args.auto:
+        print(f"\n{'>' * 10} cron nightly: 转录完后再扫 总结中+待总结 跑一次 move-done")
+        await move_done_mode(args)
 
 
 # ─── --move-done 模式 ────────────────────────────────────────────────
