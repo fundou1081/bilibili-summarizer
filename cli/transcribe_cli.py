@@ -286,6 +286,16 @@ def _generate_summaries(bvid: str, transcribed: Path = None, page: int = None) -
     single_srt = target_root / "transcript.srt"
     page_dirs = sorted([p for p in target_root.iterdir() if p.is_dir() and p.name.startswith("P")])
 
+    # 拿 title: 优先 meta.json, 否则 fallback 用 bvid (避免 summarize_one 缺 title 抛 TypeError)
+    title = bvid
+    meta_json = DOWNLOADS_DIR / bvid / "meta.json"
+    if meta_json.exists():
+        try:
+            import json
+            title = json.loads(meta_json.read_text(encoding="utf-8")).get("title", bvid)
+        except Exception:
+            pass
+
     count = 0
     if single_srt.exists() and not page_dirs:
         # 单P 模式: 直接在 transcribed/
@@ -306,7 +316,7 @@ def _generate_summaries(bvid: str, transcribed: Path = None, page: int = None) -
             count += 1
             continue
         try:
-            result = sm.summarize_one(str(srt_path))
+            result = sm.summarize_one(str(srt_path), title=title)
             summary_path.write_text(result, encoding="utf-8")
             count += 1
         except Exception as e:
