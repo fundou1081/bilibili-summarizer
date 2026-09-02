@@ -20,7 +20,7 @@ transcribe_cli.py — 收藏夹转录工作流 (3 状态机: 未总结 → 总�
   python3 transcribe_cli.py --dry-run                # 只扫描不转录
   python3 transcribe_cli.py --bvid BV1xxx            # 只处理指定视频 (测试用)
   python3 transcribe_cli.py --limit 3                # 只前 3 个
-  python3 transcribe_cli.py --skip-move              # 转录完不移到已总结
+  python3 transcribe_cli.py --skip-move              # 只跳过 LOCK (待总结→总结中), UNLOCK 仍走 (总结中→已总结)
   python3 transcribe_cli.py --skip-wiki              # 不更新 wiki
   python3 transcribe_cli.py --asr-max-duration 1800  # 长视频 ASR 只前 30 分钟
   python3 transcribe_cli.py --auto                    # cron 模式: 跳一切确认
@@ -571,7 +571,10 @@ async def main_async(args):
                 update_wiki()
 
             # 步骤 2: UNLOCK — 从「总结中」移到「已总结」
-            if not args.skip_move and locked:
+            # 修 bug #9: 即使 --skip-move 也做 UNLOCK (--skip-move 只跳过 LOCK)
+            # 原因: --bvid --skip-move 测试模式里视频可能已在 总结中, LOCK 被跳但应该 UNLOCK
+            # try/except 处理 aid=0 / 视频不在 总结中 的情况 (silent fail, 走 next --move-done)
+            if locked:
                 print(f"  → 🔓 解锁: 移动到 已总结 {args.dest} ...")
                 try:
                     await move_video_to_fav(it["aid"], args.in_progress_fav, args.dest)
@@ -823,7 +826,7 @@ def main():
                         help="只处理第 N 个分P (测试单个分P 用, 默认 = 全部)")
     parser.add_argument("--limit", type=int, help="最多处理 N 个")
     parser.add_argument("--dry-run", action="store_true", help="只扫描不转录")
-    parser.add_argument("--skip-move", action="store_true", help="不移动到目标收藏夹")
+    parser.add_argument("--skip-move", action="store_true", help="只跳过 LOCK (待总结→总结中), UNLOCK (总结中→已总结) 仍会跑 (修 bug #9)")
     parser.add_argument("--skip-wiki", action="store_true", help="不更新 wiki")
     parser.add_argument("--asr-model", default="sensevoice", choices=["sensevoice", "paraformer"],
                         help="ASR 模型 (默认 sensevoice 多语)")
