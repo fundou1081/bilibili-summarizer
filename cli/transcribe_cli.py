@@ -354,7 +354,7 @@ def _generate_summaries(bvid: str, transcribed: Path = None, page: int = None) -
             count += 1
             continue
         try:
-            result = sm.summarize_one(str(srt_path), title=title)
+            result = sm.summarize_one(srt_path.read_text(encoding="utf-8"), title=title)
             summary_path.write_text(result, encoding="utf-8")
             count += 1
         except Exception as e:
