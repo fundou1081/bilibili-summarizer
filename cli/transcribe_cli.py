@@ -269,6 +269,51 @@ async def _organize_transcripts(bvid: str, downloads=None, transcribed=None, pag
     return count
 
 
+def _resolve_title(bvid: str) -> str:
+    """Auto-detect video title from:
+    1. downloads/{BVID}/meta.json (cache, fast path)
+    2. B站 API live call (auto-generate meta.json for next time)
+    3. Fallback: bvid
+
+    比直接用 bvid 当 title 好: LLM prompt 里 title 是有意义的语义
+    (e.g. "MIT 教授讲座" vs "BV1ZNbC6fEx3"), 影响 summary 质量。
+    解决 bug #7 (title fallback)。
+    """
+    import json
+    meta_path = DOWNLOADS_DIR / bvid / "meta.json"
+
+    # 1. meta.json cache (fast path)
+    if meta_path.exists():
+        try:
+            data = json.loads(meta_path.read_text(encoding="utf-8"))
+            cached = data.get("title")
+            if cached:
+                return cached
+        except Exception:
+            pass
+
+    # 2. Live B站 API call (auto-generate cache for next time)
+    try:
+        from bilibili_api import video
+        import asyncio
+        v = video.Video(bvid=bvid)
+        info = asyncio.run(v.get_info())
+        title = info.get("title") or bvid
+        # write cache for next run
+        meta_path.parent.mkdir(parents=True, exist_ok=True)
+        meta_path.write_text(
+            json.dumps({"bvid": bvid, "title": title}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        print(f"  → auto-detected title: {title}")
+        return title
+    except Exception as e:
+        print(f"  ⚠️  探测 title 失败 ({type(e).__name__}: {e}), fallback 到 bvid")
+
+    # 3. Fallback
+    return bvid
+
+
 def _generate_summaries(bvid: str, transcribed: Path = None, page: int = None) -> int:
     """对 transcribed/{BVID}/ (单P) 或 P{N}/ (多P) 生成 summary.md
     transcribed 是 per-bvid 路径 (含 BVID), 不是 PROJECT_DIR/transcribed
@@ -286,15 +331,8 @@ def _generate_summaries(bvid: str, transcribed: Path = None, page: int = None) -
     single_srt = target_root / "transcript.srt"
     page_dirs = sorted([p for p in target_root.iterdir() if p.is_dir() and p.name.startswith("P")])
 
-    # 拿 title: 优先 meta.json, 否则 fallback 用 bvid (避免 summarize_one 缺 title 抛 TypeError)
-    title = bvid
-    meta_json = DOWNLOADS_DIR / bvid / "meta.json"
-    if meta_json.exists():
-        try:
-            import json
-            title = json.loads(meta_json.read_text(encoding="utf-8")).get("title", bvid)
-        except Exception:
-            pass
+    # 拿 title: meta.json → B站 API live call (auto-generate) → fallback bvid
+    title = _resolve_title(bvid)
 
     count = 0
     if single_srt.exists() and not page_dirs:
