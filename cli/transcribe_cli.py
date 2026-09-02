@@ -314,6 +314,47 @@ def _resolve_title(bvid: str) -> str:
     return bvid
 
 
+# Common LLM refusal phrases (中英双语) — 如果 LLM "礼貌拒绝" 而不是真总结, 应被识别为 invalid
+REFUSAL_PHRASES = [
+    "无法访问", "无法直接访问", "我无法", "我不能", "对不起", "请提供", "请粘贴", "请选择",
+    "I cannot", "I can't", "I am unable", "I don't have",
+    "please provide", "please paste", "please choose",
+    "I apologize", "I'm sorry", "I am an AI",
+    "我没有访问", "请您提供", "请您选择", "作为 AI",
+    "as an AI", "I do not have", "I'm just an AI",
+    "cannot access", "can't access", "unable to access",
+]
+
+
+def is_valid_summary(content: str, min_size: int = 1024) -> tuple[bool, str]:
+    """验证 LLM 返回内容是真总结, 不是礼貌拒绝 / placeholder。
+
+    Returns:
+        (is_valid, reason)
+        - is_valid=False: 内容不应该作为总结使用, 调用方应 raise 或 sentinel
+        - reason: 人类可读原因 (供调试 / 日志)
+
+    验证项:
+    1. 长度: >= min_size (1KB) — 真总结是 5-50KB, LLM 拒绝是 200-1000B
+    2. 拒绝关键词: 不含 REFUSAL_PHRASES 里的任一项 (中英双语)
+    3. placeholder marker: 不以 [失败] / [错误] / [Placeholder] 开头
+    """
+    if not content:
+        return False, "empty content"
+    size = len(content.encode("utf-8"))
+    if size < min_size:
+        return False, f"size {size}B < {min_size}B threshold (likely LLM refusal / placeholder)"
+    lowered = content.lower()
+    for phrase in REFUSAL_PHRASES:
+        if phrase.lower() in lowered:
+            return False, f"contains refusal phrase: {phrase!r}"
+    stripped = content.lstrip()
+    for marker in ("[失败]", "[错误]", "[Placeholder]", "[Error]"):
+        if stripped.startswith(marker):
+            return False, f"starts with placeholder marker: {marker!r}"
+    return True, "ok"
+
+
 def _generate_summaries(bvid: str, transcribed: Path = None, page: int = None) -> int:
     """对 transcribed/{BVID}/ (单P) 或 P{N}/ (多P) 生成 summary.md
     transcribed 是 per-bvid 路径 (含 BVID), 不是 PROJECT_DIR/transcribed
@@ -355,6 +396,10 @@ def _generate_summaries(bvid: str, transcribed: Path = None, page: int = None) -
             continue
         try:
             result = sm.summarize_one(srt_path.read_text(encoding="utf-8"), title=title)
+            # 验证 LLM 返回是有效总结, 不是礼貌拒绝 (bug #8 同类问题: LLM 不 throw, 返模板)
+            valid, reason = is_valid_summary(result)
+            if not valid:
+                raise RuntimeError(f"LLM 返回内容无效 ({reason}); size={len(result)}B")
             summary_path.write_text(result, encoding="utf-8")
             count += 1
         except Exception as e:
