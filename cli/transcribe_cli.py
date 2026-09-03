@@ -692,6 +692,7 @@ async def move_done_mode(args) -> None:
 
     if args.report_to:
         _write_report(args.report_to, mode="move_done",
+                      append=True,  # 修 bug #10: 不覆盖 transcribe 报告,追加到末尾
                       items=[],  # move_done 模式里 items 仅作为 in_progress_count 兏底, 以 moved+skipped 为准
                       moved=moved, skipped=skipped,
                       in_progress_count=total_scanned)
@@ -740,15 +741,23 @@ def _check_all_summaries(bvid: str, title: str) -> tuple[bool, str, list[dict]]:
     return True, "ok", parts
 
 
-def _write_report(path: str, mode: str, items: list, **kw) -> None:
+def _write_report(path: str, mode: str, items: list, append: bool = False, **kw) -> None:
     """生成汇总报告 → path (HEARTBEAT 飞书推送会读它)
     mode: "transcribe" | "move_done"
+    append: True = 追加 (保留上一次的报告), False = 覆盖 (默认)
+
+    修 bug #10: --auto --move-done 跑两遍 (transcribe → move_done),
+    旧代码两遍都 write_text 覆盖, move_done 报告掩盖 transcribe 报告。
+    现在 move_done 调用时 append=True, 两段都保留, 看得见 transcribe 结果。
     """
     p = Path(path).expanduser()
     p.parent.mkdir(parents=True, exist_ok=True)
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    lines = [f"## 📊 B站夜间转录报告 — {now}", ""]
+    if append:
+        lines = ["", "---", "", f"### 📋 move_done 追加报告 — {now}", ""]
+    else:
+        lines = [f"## 📊 B站夜间转录报告 — {now}", ""]
 
     if mode == "transcribe":
         successes = kw.get("successes", [])
@@ -803,8 +812,13 @@ def _write_report(path: str, mode: str, items: list, **kw) -> None:
         lines.append(f"_下次 run: 明天 03:30 AM (OpenClaw cron)_")
 
     content = "\n".join(lines) + "\n"
-    p.write_text(content, encoding="utf-8")
-    print(f"\n📝 报告已写: {p}")
+    if append and p.exists():
+        # 追加到现有报告 (保留 transcribe 段)
+        with p.open("a", encoding="utf-8") as f:
+            f.write(content)
+    else:
+        p.write_text(content, encoding="utf-8")
+    print(f"\n📝 报告已写: {p} (append={append})")
 
 
 # ─── CLI ─────────────────────────────────────────────────────────────
