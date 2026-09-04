@@ -200,6 +200,17 @@ async def transcribe_one(
     if not organized:
         return False, "_organize_transcripts 返回 0 个分P"
 
+    # 释放 disk: ASR 输出的 wav 在 organize 完后不再需要, 删掉省 800MB~2GB/视频
+    # (auto.srt 已拷到 transcript.srt, m4a 留着方便重跑, wav 大删掉)
+    pre_dl = DOWNLOADS_DIR / bvid
+    for wav in pre_dl.glob("*.wav"):
+        try:
+            sz_mb = wav.stat().st_size / 1024 / 1024
+            wav.unlink()
+            print(f"  ↓ 删除 wav 缓存: {wav.name} ({sz_mb:.1f} MB)")
+        except Exception as e:
+            print(f"  ⚠️  删除 wav 失败: {wav.name}: {e}")
+
     # Step 3: 每个分P 生成 summary.md
     summaries = _generate_summaries(bvid, target_root, page=page)
     if summaries == 0:
