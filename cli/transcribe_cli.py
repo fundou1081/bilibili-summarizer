@@ -414,10 +414,15 @@ def _generate_summaries(bvid: str, transcribed: Path = None, page: int = None) -
             summary_path.write_text(result, encoding="utf-8")
             count += 1
         except Exception as e:
+            # 修 bug (反模式 A — placeholder 掩盖错误):
+            # 之前 try/except 写 placeholder + count++ 让 transcribe_one 误以为"成功"
+            # 后果: 多P 视频 16/18 P 失败但报告 100% 成功, Stanford 823min 卡「总结中」
+            # 修法: 失败 → 写 placeholder (人工排查用), 但 count 不加, raise 让上层知道失败
             placeholder = f"[失败] LLM 总结失败: {type(e).__name__}: {e}\n\n"
-            placeholder += f"重跑命令: python3 transcribe_skill.py --bvid {bvid} --yes\n"
+            placeholder += f"重跑命令: python3 transcribe_skill.py --bvid {bvid} --page {page_name[1:] if page_name else 'all'} --yes\n"
             summary_path.write_text(placeholder, encoding="utf-8")
-            count += 1
+            print(f"  ⚠️  {page_name or '(单P)'} 总结失败: {type(e).__name__}: {e}")
+            # 不 count++, 让 _generate_summaries 返回 < total, transcribe_one 返回 False
 
     # 多P 视频生成 index.md
     if len(page_dirs) > 1:
